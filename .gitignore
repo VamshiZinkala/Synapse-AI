@@ -1,0 +1,21 @@
+# next js
+chatbot/.next
+chatbot/node_modules
+
+#python
+chatbot-backend/__pycache__/
+chatbot-backend/.venv/
+chatbot-backend/venv/
+chatbot-backend/.vscode
+
+
+# Environment variables
+**/.env
+**/.env.local
+
+# expense-mcp-server
+expense-mcp-server/__pycache__/
+expense-mcp-server/.venv/
+expense-mcp-server/.env/
+
+.vscode
