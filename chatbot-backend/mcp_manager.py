@@ -1,5 +1,9 @@
 import os
+from pathlib import Path
 from langchain_mcp_adapters.client import MultiServerMCPClient
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+EXPENSE_SERVER_DIR = str(BASE_DIR / "expense-mcp-server")
 
 SERVERS = {
     # "ocr_engine": {
@@ -9,10 +13,10 @@ SERVERS = {
     #     "transport": "stdio"
     # },
     "expense_tracker": {
-        "command": r"C:\Users\z005a42h\AppData\Local\Programs\Python\Python313\Scripts\uv.exe",
+        "command": "uv",
         "args": [
             "--directory", 
-            r"C:\Users\z005a42h\Documents\Rag-application\expense-mcp-server", 
+            EXPENSE_SERVER_DIR, 
             "run", 
             "main.py"
         ],
@@ -26,6 +30,7 @@ class MCPToolManager:
         self.mcp_tools = []
         self.client = None
         self.mcp_resources = []
+        
     async def initialize(self, config_dicts):
         """Connects to all user-configured MCP Servers and extracts their tools."""
         print("Initializing MCP Client Connections...")

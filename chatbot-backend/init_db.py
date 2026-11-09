@@ -1,10 +1,12 @@
-import asyncio
+﻿import asyncio
 from sqlalchemy import text
 from database import engine, Base
 from models import Conversation, DocumentChunk, Message, UserMemory
 
 # The raw SQL to create our custom vector search function
 MATCH_DOCS_SQL = """
+DROP FUNCTION IF EXISTS match_documents(vector, text, text, int, text[]);
+
 CREATE OR REPLACE FUNCTION match_documents(
     query_embedding vector(1024),
     target_user_id text,
@@ -17,7 +19,8 @@ RETURNS TABLE (
     content text,
     source_file text,
     page_number int,
-    similarity float
+    similarity float,
+    raw_topology jsonb
 )
 LANGUAGE plpgsql
 AS $$
@@ -28,7 +31,8 @@ BEGIN
         dc.content, 
         dc.source_file, 
         dc.page_number,
-        1 - (dc.embedding <=> query_embedding) AS similarity
+        1 - (dc.embedding <=> query_embedding) AS similarity,
+        dc.raw_topology
     FROM document_chunks dc
     WHERE dc.user_id = target_user_id
       AND dc.conversation_id::text = target_thread_id
@@ -55,4 +59,5 @@ async def create_tables():
     print("All database tables and functions created successfully!")
 
 if __name__ == "__main__":
-    asyncio.run(create_tables())
+    import selectors
+    asyncio.run(create_tables(), loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()))

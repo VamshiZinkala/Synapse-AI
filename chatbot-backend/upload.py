@@ -1,9 +1,10 @@
-import io
+﻿import io
 import os
 from PIL import Image
 from fastapi import UploadFile, APIRouter, File, Form, HTTPException
 from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownTextSplitter
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_huggingface import HuggingFaceEmbeddings
 import pymupdf
 import pymupdf4llm
 import docx
@@ -22,28 +23,35 @@ from models import DocumentChunk
 router = APIRouter()
 
 
-embedding_model = OpenAIEmbeddings(
-    api_key=os.environ["OPENAI_API_KEY"],
-    base_url=os.environ["BASE_URL"],
-    model="qwen3-embedding-0.6b"
-)
-
-
-# vision_llm = ChatGroq(
-#     model="meta-llama/llama-4-scout-17b-16e-instruct",
-#     temperature=0,
-#     max_tokens=None,
-#     # reasoning_format="parsed",
-#     timeout=None,
-#     max_retries=2,
-#     api_key=os.environ["groq_api_key"]
+# embedding_model = OpenAIEmbeddings(
+#     api_key=os.environ["OPENAI_API_KEY"],
+#     base_url=os.environ["BASE_URL"],
+#     model=os.environ["EMBEDDING_MODEL"]
 # )
 
-vision_llm = ChatOpenAI(
-    model="qwen-3.6-27b", #ministral-3-14b-instruct-2512",
-    api_key=os.environ["OPENAI_API_KEY"],
-    base_url=os.environ["IMAGE_BASE_URL"]
+embedding_model = HuggingFaceEmbeddings(
+    model=os.environ["EMBEDDING_MODEL"]
 )
+vision_llm = ChatGroq(
+    model=os.environ["VISION_MODEL"],
+    temperature=0,
+    max_tokens=None,
+    # reasoning_format="parsed",
+    timeout=None,
+    max_retries=2,
+    api_key=os.environ["GROQ_API_KEY"]
+)
+
+# Vision via OpenRouter (free tier, supports base64 image input)
+# vision_llm = ChatOpenAI(
+#     model=os.environ.get("VISION_MODEL", "meta-llama/llama-4-scout:free"),
+#     api_key=os.environ["OPENAI_API_KEY"],
+#     base_url=os.environ.get("IMAGE_BASE_URL", os.environ["BASE_URL"]),
+#     temperature=0,
+#     max_tokens=4096,
+#     timeout=120,
+#     max_retries=2,
+# )
 
 vision_prompt = ChatPromptTemplate.from_messages([
 

@@ -1,0 +1,3 @@
+# Synapse AI - Root Requirements
+# Points directly to the backend requirements file
+-r chatbot-backend/requirements.txt

@@ -4,6 +4,7 @@ import uuid
 from typing import TypedDict, Annotated, List, Optional, Literal
 from langchain_core.messages import BaseMessage, AIMessage, RemoveMessage, ToolMessage
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langgraph.graph import START, END, StateGraph
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from dotenv import load_dotenv
@@ -34,22 +35,20 @@ load_dotenv()
 # main model
 llm = ChatOpenAI(
     base_url=os.environ["BASE_URL"],
-    model="deepseek-v4-flash",
-    api_key=os.environ['OPENAI_API_KEY'],
+    model=os.environ["CHAT_MODEL"],
+    api_key=os.environ["OPENAI_API_KEY"],
     streaming=True
 )
 # embedding model
-embedding_model = OpenAIEmbeddings(
-    api_key=os.environ["OPENAI_API_KEY"],
-    base_url=os.environ["BASE_URL"],
-    model="qwen3-embedding-0.6b"
+embedding_model = HuggingFaceEmbeddings(
+    model=os.environ["EMBEDDING_MODEL"]
 )
 
 # fast memory model
 memory_llm = ChatOpenAI(
     base_url=os.environ["BASE_URL"],
-    model="deepseek-v4-flash",
-    api_key=os.environ['OPENAI_API_KEY'],
+    model=os.environ["CHAT_MODEL"],
+    api_key=os.environ["OPENAI_API_KEY"],
     streaming=True
 )
 
