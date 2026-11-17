@@ -1,7 +1,14 @@
 ﻿import asyncio
 from sqlalchemy import text
 from database import engine, Base
-from models import Conversation, DocumentChunk, Message, UserMemory
+from models import (
+    Conversation,
+    DiagramCorrection,
+    DiagramVersion,
+    DocumentChunk,
+    Message,
+    UserMemory,
+)
 
 # The raw SQL to create our custom vector search function
 MATCH_DOCS_SQL = """

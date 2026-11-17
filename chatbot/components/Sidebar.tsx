@@ -41,7 +41,7 @@ export default function Sidebar({
           <div>
             <p className="text-xl font-medium uppercase tracking-widest text-[#00cccc]"
             >
-            Agent
+            SYNAPSE AI
           </p>
           <h2 className="mt-1 text-lg font-semibold text-white">Chats</h2>
         </div>

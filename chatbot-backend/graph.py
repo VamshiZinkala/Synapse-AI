@@ -1,5 +1,5 @@
 from langgraph.graph.message import add_messages
-import uuid
+import uuid, subprocess
 # from langgraph.graph import MessagesState
 from typing import TypedDict, Annotated, List, Optional, Literal
 from langchain_core.messages import BaseMessage, AIMessage, RemoveMessage, ToolMessage
@@ -28,7 +28,12 @@ from langsmith import traceable
 from flashrank import Ranker, RerankRequest
 from langchain_community.agent_toolkits import SQLDatabaseToolkit
 from langchain_community.utilities import SQLDatabase
+# from langchain_community.tools import ShellTool
+from langchain_community.agent_toolkits import FileManagementToolkit
 ranker = Ranker()
+
+workspace_dir = os.path.abspath(r"C:\Workspace")
+
 
 
 load_dotenv()
@@ -39,6 +44,7 @@ llm = ChatOpenAI(
     api_key=os.environ["OPENAI_API_KEY"],
     streaming=True
 )
+
 # embedding model
 embedding_model = HuggingFaceEmbeddings(
     model=os.environ["EMBEDDING_MODEL"]
@@ -70,6 +76,14 @@ toolkit = SQLDatabaseToolkit(
     db=db,
     llm=llm,
 )
+
+file_toolkit = FileManagementToolkit(
+    root_dir = workspace_dir
+)
+
+# shell_tool = ShellTool()
+
+file_tools = file_toolkit.get_tools()
 
 sql_tools = toolkit.get_tools()
 # print(sql_tools)
@@ -302,8 +316,30 @@ async def highlight_components(actions: List[HighlighTarget], edges: List[EdgeHi
 
     return f"Visual canvas action tracking updated successfully for path: {reason}"
 
+@tool
+def run_terminal_command(command: str) -> str:
+    """
+    Execute a terminal / PowerShell command inside C:\\Workspace.
+    Use this to install dependencies, run scripts, create projects, or execute CLI commands.
+    """
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", command],
+            cwd=workspace_dir,
+            capture_output=True,
+            text=True,
+            timeout=180
+        )
+        output = (proc.stdout or "") + (proc.stderr or "")
+        return output.strip() if output.strip() else f"Command completed with exit code {proc.returncode}"
+    except subprocess.TimeoutExpired:
+        return "Command timed out after 180 seconds."
+    except Exception as e:
+        return f"Error executing command: {str(e)}"
+
 tools=[get_stock_price, search_tool,
-         calculator, get_today_Date, retrieve_docs, get_current_time, highlight_components, *sql_tools]
+         calculator, get_today_Date, retrieve_docs, get_current_time, highlight_components, *sql_tools,*file_tools,run_terminal_command]
+
 # bind
 # llm_with_tools = llm.bind_tools(tools)
 
@@ -336,6 +372,7 @@ memory_prompt=ChatPromptTemplate.from_messages([
     )),
     ("user", "User Message: {user_msg}")
 ])
+
 memory_parser=PydanticOutputParser(pydantic_object=LongTermMemorySchema)
 # Extract user memory for LTM
 

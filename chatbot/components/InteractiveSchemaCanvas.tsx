@@ -1,28 +1,31 @@
-import React, { useCallback, useEffect, useMemo } from "react";
+import React, { useCallback, useEffect, useMemo, useRef } from "react";
 import ReactFlow, {
   Background,
   Controls,
   ReactFlowProvider,
   Node,
   Edge,
+  NodeProps,
+  Connection,
   Handle,
   Position,
   BackgroundVariant,
   useNodesState,
   useEdgesState,
   addEdge,
-  MiniMap
+  MiniMap,
+  useReactFlow,
 } from "reactflow";
 import "reactflow/dist/style.css";
 
 type GraphPayload = {
   topology: {
-    nodes: { name: string, attributes: { name: string, data_type: string, is_key: "PK" | "FK" | "none" }[] }[];
+    nodes: { name: string, attributes?: { name: string, data_type?: string | null, is_key: "PK" | "FK" | "none" }[] | null }[];
     edges: {
       source: string;
       target: string;
       relationship?: string;
-      cardinality_or_type: string;
+      cardinality_or_type?: string | null;
     }[];
   };
   actions: {
@@ -65,7 +68,14 @@ const statusClasses = {
   },
 };
 
-function SchemaEntityNode({ data }: any) {
+type SchemaNodeData = {
+  name: string;
+  attributes?: NonNullable<GraphPayload["topology"]["nodes"][number]["attributes"]>;
+  tableStatus?: keyof typeof statusClasses;
+  attributeActionMap?: Map<string, keyof typeof statusClasses>;
+};
+
+function SchemaEntityNode({ data }: NodeProps<SchemaNodeData>) {
 
   const styles = statusClasses[data.tableStatus as keyof typeof statusClasses] ??
     statusClasses.normal;
@@ -101,7 +111,7 @@ function SchemaEntityNode({ data }: any) {
 
       {/* Attributes */}
       <div className="divide-y divide-slate-700">
-        {data.attributes?.map((attr: any) => {
+        {data.attributes?.map((attr) => {
           const attrStatus = data.attributeActionMap?.get(`${data.name}:${attr.name}`) ?? "normal";
 
           const attrRowClass = attrStatus === "highlight" ? "bg-green-500/20"
@@ -157,11 +167,18 @@ function SchemaEntityNode({ data }: any) {
   );
 }
 
-const nodeTypes = {
-  entityNode: SchemaEntityNode
-};
-
 function SchemaCanvasInner({ graphPayload }: { graphPayload: GraphPayload }) {
+  const { fitView } = useReactFlow();
+
+  const nodeTypes = useMemo(() => ({
+    entityNode: SchemaEntityNode,
+  }), []);
+  const edgeTypes = useMemo(() => ({}), []);
+  const topologyKey = useMemo(
+    () => JSON.stringify({ nodes: graphPayload.topology.nodes, edges: graphPayload.topology.edges }),
+    [graphPayload.topology.nodes, graphPayload.topology.edges],
+  );
+  const previousTopologyKey = useRef(topologyKey);
 
   const { tableActionMap, attributeActionMap } = useMemo(() => {
     const tableActionMap = new Map();
@@ -255,7 +272,7 @@ function SchemaCanvasInner({ graphPayload }: { graphPayload: GraphPayload }) {
         id: `e-${idx}`,
         source: e.source,
         target: e.target,
-        label: e.cardinality_or_type,
+        label: e.relationship || e.cardinality_or_type,
 
 
 
@@ -285,25 +302,31 @@ function SchemaCanvasInner({ graphPayload }: { graphPayload: GraphPayload }) {
 
 
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes)
-  const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges)
+  const [edges, setEdges] = useEdgesState(initialEdges)
   
   const onConnect = useCallback( // connecting edges
-    (connection: any) => setEdges((eds) => addEdge(connection, eds)),
+    (connection: Connection) => setEdges((eds) => addEdge(connection, eds)),
   [setEdges])
 
   useEffect(() => {
-    setNodes(initialNodes)
-  }, [initialNodes, setNodes])
-
-  useEffect(() => {
+    setNodes(initialNodes);
     setEdges(initialEdges)
-  }, [initialEdges, setEdges])
+
+    if (previousTopologyKey.current === topologyKey) return;
+    previousTopologyKey.current = topologyKey;
+
+    const frameId = window.requestAnimationFrame(() => {
+      void fitView({ padding: 0.2, duration: 200 });
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, [initialNodes, initialEdges, setNodes, setEdges, topologyKey, fitView]);
   return (
     <div className="h-full w-full ">
       <ReactFlow
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         onNodesChange={onNodesChange}
         fitView
         nodesDraggable={true}

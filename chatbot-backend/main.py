@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 import time
@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 # from supabase import create_client, Client
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy import select, text
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 from graph import build_graph, trigger_async_memory_update, fetch_compiled_user_context, pool
 from contextlib import asynccontextmanager
@@ -19,6 +19,15 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from mcp_manager import mcp_manager, SERVERS
 from database import AsyncSessionLocal
 from models import Message, Conversation
+from diagram_corrections import (
+    CorrectionConflict,
+    CorrectionNotFound,
+    CorrectionValidationFailure,
+    accept_correction,
+    create_correction_proposal,
+    list_conversation_corrections,
+    reject_correction,
+)
 
 load_dotenv()
 chatbot = None
@@ -190,6 +199,108 @@ async def stream_response(message: str, thread_id: str, human_msg_id: str, ai_ms
                 print(f"Failed to save AI message: {e}")
 
 
+class DiagramCorrectionRequest(BaseModel):
+    conversation_id: uuid.UUID
+    source_chunk_id: uuid.UUID
+    user_id: str = Field(min_length=1)
+    requirements: str = ""
+
+
+@app.post("/diagram/correct")
+async def correct_diagram_endpoint(
+    request: DiagramCorrectionRequest
+):
+    try:
+        return await create_correction_proposal(
+            conversation_id=request.conversation_id,
+            source_chunk_id=request.source_chunk_id,
+            user_id=request.user_id,
+            requirements=request.requirements
+        )
+    except CorrectionNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except CorrectionConflict as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e)
+        )
+
+    except Exception as e:
+        traceback.print_exc()
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Diagram correction failed: {str(e)}"
+        )
+
+
+class CorrectionDecisionRequest(BaseModel):
+    user_id: str = Field(min_length=1)
+
+
+@app.get("/conversation/{thread_id}/corrections")
+async def get_conversation_correction_history(
+    thread_id: uuid.UUID,
+    user_id: str = Query(..., min_length=1),
+):
+    try:
+        return {
+            "corrections": await list_conversation_corrections(
+                conversation_id=thread_id,
+                user_id=user_id,
+            )
+        }
+    except CorrectionNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Correction history retrieval failed: {str(e)}")
+
+
+@app.post("/diagram/corrections/{correction_id}/accept")
+async def accept_diagram_correction_endpoint(
+    correction_id: uuid.UUID,
+    request: CorrectionDecisionRequest,
+):
+    try:
+        return await accept_correction(
+            correction_id=correction_id,
+            user_id=request.user_id,
+        )
+    except CorrectionNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except CorrectionConflict as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except CorrectionValidationFailure as e:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(e), "errors": e.errors},
+        )
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Correction acceptance failed: {str(e)}")
+
+
+@app.post("/diagram/corrections/{correction_id}/reject")
+async def reject_diagram_correction_endpoint(
+    correction_id: uuid.UUID,
+    request: CorrectionDecisionRequest,
+):
+    try:
+        return await reject_correction(
+            correction_id=correction_id,
+            user_id=request.user_id,
+        )
+    except CorrectionNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except CorrectionConflict as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Correction rejection failed: {str(e)}")
+
 @app.post("/chat")
 async def chat(payload: dict, background_tasks: BackgroundTasks):
     message = payload.get("message", "")
@@ -292,7 +403,7 @@ async def get_messages(conversation_id: str, user_id: str):
 @app.get("/conversation/{thread_id}/topologies")
 async def get_thread_topologies(thread_id: str):
     stmt = text("""
-        SELECT source_file, raw_topology
+        SELECT id AS source_chunk_id, source_file, raw_topology
         FROM document_chunks
         WHERE conversation_id = :tid
         AND raw_topology IS NOT NULL
@@ -309,5 +420,13 @@ async def get_thread_topologies(thread_id: str):
         "topologies": {
             row["source_file"]: row["raw_topology"]
             for row in rows
-        }
+        },
+        "topology_records": [
+            {
+                "source_chunk_id": str(row["source_chunk_id"]),
+                "source_file": row["source_file"],
+                "topology": row["raw_topology"],
+            }
+            for row in rows
+        ],
     }

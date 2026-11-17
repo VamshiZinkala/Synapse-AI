@@ -1,4 +1,4 @@
-﻿import io
+import io
 import os
 from PIL import Image
 from fastapi import UploadFile, APIRouter, File, Form, HTTPException
@@ -29,17 +29,16 @@ router = APIRouter()
 #     model=os.environ["EMBEDDING_MODEL"]
 # )
 
-embedding_model = HuggingFaceEmbeddings(
-    model=os.environ["EMBEDDING_MODEL"]
-)
-vision_llm = ChatGroq(
-    model=os.environ["VISION_MODEL"],
+from graph import embedding_model
+# Vision via OpenRouter (free tier, supports base64 image input)
+vision_llm = ChatOpenAI(
+    model=os.environ.get("VISION_MODEL", "qwen/qwen2.5-vl-72b-instruct:free"),
+    api_key=os.environ["OPENAI_API_KEY"],
+    base_url=os.environ.get("IMAGE_BASE_URL", os.environ.get("BASE_URL")),
     temperature=0,
-    max_tokens=None,
-    # reasoning_format="parsed",
-    timeout=None,
+    max_tokens=4096,
+    timeout=120,
     max_retries=2,
-    api_key=os.environ["GROQ_API_KEY"]
 )
 
 # Vision via OpenRouter (free tier, supports base64 image input)
@@ -59,7 +58,13 @@ vision_prompt = ChatPromptTemplate.from_messages([
         {
             "type": "text",
             "text": """
-            Analyze this technical diagram or schematic carefully.
+            First classify the image, then extract topology only when it clearly contains a diagram.
+
+            Classification rules:
+            - Set `is_diagram` to true only when the image visibly contains diagram structure, such as entity boxes with connectors, labeled system components with explicit lines/arrows, or circuit symbols and nets.
+            - A folder/file manager, desktop, application window, ordinary screenshot, photo, document page, or list of filenames is NOT a diagram. Set `is_diagram` to false and return empty `nodes` and `edges`.
+            - Do not reinterpret folder names, icons, rows, buttons, or arbitrary text as entities, components, or relationships.
+            - If you cannot tell whether the image is a diagram, set `is_diagram` to false. Do not guess.
 
             You MUST follow these strict rules:
             - Use ONLY information that is directly visible or clearly inferable from the image.
@@ -71,13 +76,16 @@ vision_prompt = ChatPromptTemplate.from_messages([
               (b) Reasonable inferences (state them as "likely" or "inferred", not certain)
               (c) Unknowns (explicitly mark them)
 
-            CRITICAL DOMAIN RULES:
+            When `is_diagram` is false, stop topology extraction and describe the image briefly without creating any nodes or edges.
+
+            CRITICAL DOMAIN RULES (apply only when `is_diagram` is true):
             1. For ER Diagrams(including Chen's Notation with floating attribute bubbles): 
                 - Identify primary Entities (rectangles) as Nodes of type "entity".
                - Group all connected visual attribute bubbles (ovals like Ssn, Fname, Name) directly INSIDE that parental Entity's `attributes` list. Do NOT create separate independent nodes for individual attributes.
                - Detect primary keys by looking for underlined text inside the bubbles (e.g., Ssn, Number) and mark their `is_key` field as "PK".
                - Treat diamond relationship shapes (like WORKS_FOR, MANAGES) as Edges connecting the respective entity nodes, capturing the visible cardinality mapping (e.g., '1', 'N', 'M').
             2. For Circuit Schematics: Identify Components (ICs, Resistors, Pins), Nets, Power Rails, and Ground lines.
+            3. For software or system architecture diagrams: include only visibly labeled components and explicitly drawn connections.
 
             Provide two outputs:
 
@@ -150,20 +158,34 @@ class Node(BaseModel):
 
 
 class ImageTopology(BaseModel):
+    is_diagram: bool = Field(
+        default=False,
+        description="True only when the image visibly contains a technical diagram with explicit structural elements and connections. False for ordinary screenshots, folder views, photos, or uncertain cases.",
+    )
     detailed_description: str = Field(
-        description="A thorough text explanation of what this system is, the components visible, and the overarching conceptual flow."
+        description="A grounded description of the image. If it is not a diagram, state that no diagram topology was detected."
     )
     nodes: List[Node] = Field(
+        default_factory=list,
         description="Array of Entity tables or Circuit components identified in the technical drawing image.")
     edges: List[Edge] = Field(
-        description="n array of explicit line connections, data paths, or structural dependencies between nodes.")
+        default_factory=list,
+        description="Array of explicit line connections, data paths, or structural dependencies between nodes.")
 
 
 vlm_parser = PydanticOutputParser(pydantic_object=ImageTopology)
 
 
-async def generate_embedding(texts: list[str]) -> list[list[float]]:
-    return await embedding_model.aembed_documents(texts)
+async def generate_embedding(texts: list[str], batch_size: int = 1) -> list[list[float]]:
+    print(f"Starting embeddings for {len(texts)} chunks...")
+    all_embeddings = []
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i : i + batch_size]
+        print(f"Embedding batch {i + 1}..{min(i + batch_size, len(texts))}/{len(texts)} (chars={[len(t) for t in batch]})")
+        batch_embeddings = await embedding_model.aembed_documents(batch)
+        all_embeddings.extend(batch_embeddings)
+    print("All embeddings generated!")
+    return all_embeddings
 
 
 def parse_text(file_bytes: bytes) -> list[Document]:
@@ -199,7 +221,7 @@ async def parse_pdf_to_langchain_docs(file_bytes: bytes, filename: str, thread_i
         # image data
         page = doc[index]
         image_list = page.get_images(full=True)
-
+        print(index , len(image_list))
         if image_list:
             print(f"Found images: {len(image_list)} on page{page_number}")
 
@@ -212,9 +234,32 @@ async def parse_pdf_to_langchain_docs(file_bytes: bytes, filename: str, thread_i
                 img_b64 = base64.b64encode(img_bytes).decode('utf-8')
 
                 try:
+                    print(f"VLM invoking for page {page_number}...")
                     vlm_response = await chain.ainvoke({
                         "image_url": f"data:image/{ext};base64,{img_b64}"
                     })
+
+                    is_diagram = vlm_response.is_diagram and bool(vlm_response.nodes)
+                    print(f"VLM response for page {page_number}: is_diagram={vlm_response.is_diagram}, nodes={len(vlm_response.nodes)}, edges={len(vlm_response.edges)}")
+
+                    if not is_diagram:
+                        description_text = f"""[FILE_TYPE: IMAGE_DESCRIPTION]
+                            IMAGE_SOURCE: Embedded in {filename}
+                            EMBEDDED_PAGE: {page_number}
+
+                            DESCRIPTION:
+                            {vlm_response.detailed_description}
+
+                            No diagram topology was detected."""
+                        final_documents.append(Document(
+                            page_content=description_text,
+                            metadata={
+                                'source': filename,
+                                'thread_id': thread_id,
+                                'page_number': page_number,
+                            },
+                        ))
+                        continue
 
                     nodes_list = []
                     for n in vlm_response.nodes:
@@ -243,15 +288,15 @@ async def parse_pdf_to_langchain_docs(file_bytes: bytes, filename: str, thread_i
                     edges_str = "\n".join(edges_list)
 
                     topology_text = f"""[FILE_TYPE: IMAGE_TOPOLOGY]
-IMAGE_SOURCE: Embedded in {filename}
-EMBEDDED_PAGE: {page_number}
+                            IMAGE_SOURCE: Embedded in {filename}
+                            EMBEDDED_PAGE: {page_number}
 
-STRUCTURED_GRAPH_DATA:
-Nodes (Components): {nodes_str}
-Edges (Connections): {edges_str}
+                            STRUCTURED_GRAPH_DATA:
+                            Nodes (Components): {nodes_str}
+                            Edges (Connections): {edges_str}
 
-DETAILED_DESCRIPTION:
-{vlm_response.detailed_description}"""
+                            DETAILED_DESCRIPTION:
+                            {vlm_response.detailed_description}"""
 
                     img_doc = Document(
                         page_content=topology_text,
@@ -269,6 +314,7 @@ DETAILED_DESCRIPTION:
                     print(
                         f"Failed to process embedded image on page{page_number}: {str(e)}")
                     continue
+    print("pdf embeded Done")
 
     return final_documents
 
@@ -311,7 +357,7 @@ async def upload_file(file: UploadFile = File(...), thread_id: str = Form(...), 
             elif ext == 'docx':
                 raw_text = parse_docx(file_bytes)
             elif ext in ["csv", "xlsx"]:
-                raw_text = parse_spreadsheet(file_bytes)
+                raw_text = parse_spreadsheet(file_bytes, ext)
 
             # split into chunks
             text_splitter = RecursiveCharacterTextSplitter(
@@ -331,7 +377,7 @@ async def upload_file(file: UploadFile = File(...), thread_id: str = Form(...), 
 
         # sending them all to the embedding model at once
         vectors = await generate_embedding(texts_to_embed)
-
+        print(texts_to_embed)
         async with AsyncSessionLocal() as db:
             db_chunks = []
             for doc, vector in zip(langchain_documents, vectors):
@@ -358,67 +404,152 @@ async def upload_file(file: UploadFile = File(...), thread_id: str = Form(...), 
 
 
 @router.post('/uploadimage')
-async def upload_image(file: UploadFile = File(...), thread_id: str = Form(...), user_id: str = Form(...)) -> dict:
+async def upload_image(
+    file: UploadFile = File(...),
+    thread_id: str = Form(...),
+    user_id: str = Form(...)
+) -> dict:
     try:
         file_bytes = await file.read()
         filename = file.filename or "unknown_image.jpg"
-        
-        # img = Image.open(io.BytesIO(file_bytes))
 
-        # buffer = io.BytesIO()
-        # img.save(buffer, format="PNG")
-        
+        # 1. Validate image type
+        allowed_types = [
+            "image/png",
+            "image/jpeg",
+            "image/jpg",
+            "image/webp",
+            "image/gif"
+        ]
+
+        content_type = (file.content_type or "").lower()
+
+        if content_type not in allowed_types:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported image type: {content_type}. "
+                       f"Allowed types are: {', '.join(allowed_types)}"
+            )
+
+        # 2. Validate image size (5 MB)
+        max_size = 5 * 1024 * 1024
+
+        if len(file_bytes) > max_size:
+            raise HTTPException(
+                status_code=400,
+                detail="Image size exceeds 5 MB limit."
+            )
+
+        if not file_bytes:
+            raise HTTPException(
+                status_code=400,
+                detail="Uploaded image is empty."
+            )
+
+        # 3. Validate actual image format
+        try:
+            img = Image.open(io.BytesIO(file_bytes))
+            img.verify()
+        except Exception:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid or corrupted image file."
+            )
+
+        # 4. Convert image to Base64
         image_b64 = base64.b64encode(file_bytes).decode('utf-8')
 
+        # 5. Invoke vision model
         chain = vision_prompt.partial(
-            format_instructions=vlm_parser.get_format_instructions()) | vision_llm | vlm_parser
+            format_instructions=vlm_parser.get_format_instructions()
+        ) | vision_llm | vlm_parser
 
         print("VLM invoking")
 
         vlm_response = await chain.ainvoke({
-            "image_url": f"data:{file.content_type};base64,{image_b64}"
+            "image_url": f"data:{content_type};base64,{image_b64}"
         })
-        # print(vlm_response)
-        nodes_list = []
-        for n in vlm_response.nodes:
-            meta_str = json.dumps(n.metadata) if n.metadata else "{}"
-            
-            attr_strings = []
-            if n.attributes:
-                for attr in n.attributes:
-                    key_tag = f" [{attr.is_key}]" if attr.is_key != "none" else ""
-                    d_type = f" ({attr.data_type})" if attr.data_type and attr.data_type != "not specified" else ""
-                    attr_strings.append(f"    * Attribute: {attr.name}{key_tag}{d_type}")
-            
-            attr_block = "\n" + "\n".join(attr_strings) if attr_strings else " (None)" # attribute
-            
-            nodes_list.append(
-                f"- **{n.name}** [Type: {n.type}, Source: {n.source}, Confidence: {n.confidence}], Metadata: {meta_str}"
-                f" Attributes/Fields:{attr_block}"
-            )
-        nodes_str = "\n".join(nodes_list)
 
-        edges_list = []
-        for e in vlm_response.edges:
-            c_type = f" | Type: {e.cardinality_or_type}" if e.cardinality_or_type else ""
-            edges_list.append(
-                f"- {e.source} ===({e.relationship}{c_type})===> {e.target}")
-        edges_str = "\n".join(edges_list)
+        is_diagram = vlm_response.is_diagram and bool(vlm_response.nodes)
+        raw_topology = None
 
-        topology_text = f"""
-        [FILE_TYPE: IMAGE_TOPOLOGY]
-        IMAGE_NAME: {filename}
+        if not is_diagram:
+            topology_text = f"""[FILE_TYPE: IMAGE_DESCRIPTION]
+                IMAGE_NAME: {filename}
 
-        STRUCTURED_GRAPH_DATA:
-        Nodes (Components): {nodes_str}
-        Edges (Connections): {edges_str}
+                DESCRIPTION:
+                {vlm_response.detailed_description}
 
-        DETAILED_DESCRIPTION:
-        {vlm_response.detailed_description}
-        """
-        print("embedding started")
+                No diagram topology was detected."""
+        else:
+            # 6. Prepare nodes
+            nodes_list = []
+
+            for n in vlm_response.nodes:
+                meta_str = json.dumps(n.metadata) if n.metadata else "{}"
+
+                attr_strings = []
+                if n.attributes:
+                    for attr in n.attributes:
+                        key_tag = f" [{attr.is_key}]" if attr.is_key != "none" else ""
+                        d_type = (
+                            f" ({attr.data_type})"
+                            if attr.data_type and attr.data_type != "not specified"
+                            else ""
+                        )
+                        attr_strings.append(
+                            f"    * Attribute: {attr.name}{key_tag}{d_type}"
+                        )
+
+                attr_block = (
+                    "\n" + "\n".join(attr_strings)
+                    if attr_strings else " (None)"
+                )
+
+                nodes_list.append(
+                    f"- **{n.name}** [Type: {n.type}, Source: {n.source}, "
+                    f"Confidence: {n.confidence}], Metadata: {meta_str}"
+                    f" Attributes/Fields:{attr_block}"
+                )
+
+            nodes_str = "\n".join(nodes_list)
+
+            # 7. Prepare edges
+            edges_list = []
+
+            for e in vlm_response.edges:
+                c_type = (
+                    f" | Type: {e.cardinality_or_type}"
+                    if e.cardinality_or_type else ""
+                )
+                edges_list.append(
+                    f"- {e.source} ===({e.relationship}{c_type})===> {e.target}"
+                )
+
+            edges_str = "\n".join(edges_list)
+
+            # 8. Construct topology text
+            topology_text = f"""
+            [FILE_TYPE: IMAGE_TOPOLOGY]
+            IMAGE_NAME: {filename}
+
+            STRUCTURED_GRAPH_DATA:
+            Nodes (Components): {nodes_str}
+            Edges (Connections): {edges_str}
+
+            DETAILED_DESCRIPTION:
+            {vlm_response.detailed_description}
+"""
+            raw_topology = {
+                "nodes": [n.model_dump() for n in vlm_response.nodes],
+                "edges": [e.model_dump() for e in vlm_response.edges],
+            }
+
+        # 9. Generate embedding
+        print("Embedding started")
         vector = await generate_embedding([topology_text])
 
+        # 10. Store in database
         async with AsyncSessionLocal() as db:
             new_chunk = DocumentChunk(
                 conversation_id=uuid.UUID(thread_id),
@@ -427,19 +558,28 @@ async def upload_image(file: UploadFile = File(...), thread_id: str = Form(...),
                 embedding=vector[0],
                 source_file=filename,
                 page_number=None,
-                raw_topology={
-                    "nodes": [n.model_dump() for n in vlm_response.nodes],
-                    "edges": [e.model_dump() for e in vlm_response.edges]
-                }
+                raw_topology=raw_topology
             )
+
             db.add(new_chunk)
             await db.commit()
 
         print("Image info successfully indexed")
 
-        return {'status': 'success', 'message': 'Image processed and indexed successfully'}
+        return {
+            'status': 'success',
+            'message': 'Image processed and indexed successfully' if is_diagram else 'Image indexed; no diagram topology was detected.',
+            'topology_detected': is_diagram,
+        }
+
+    except HTTPException:
+        raise
+
     except Exception as e:
         import traceback
         traceback.print_exc()
+
         raise HTTPException(
-            status_code=500, detail=f"Failed to process image: {str(e)}")
+            status_code=500,
+            detail=f"Failed to process image: {str(e)}"
+        )
